@@ -238,7 +238,82 @@ def baseline_subtract_minimum(x, y, xmin, xmax):
         y_corr = y_corr - np.nanmin(y_corr[mask])
     return y_corr
 
+def sum_integrate_region(
+    x,
+    y,
+    xmin,
+    xmax,
+    absolute=True,
+    baseline="none",
+    scale_mode="dx"
+):
+    """Sum-based integration.
 
+    scale_mode:
+    - "dx": returns sum(y) * median dx, comparable to ppm-scaled area.
+    - "raw": returns sum(y), comparable to raw point-sum area.
+    """
+
+    low, high = sorted([xmin, xmax])
+
+    x = np.asarray(x, dtype=float)
+    y = np.asarray(y, dtype=float)
+
+    mask = (x >= low) & (x <= high)
+
+    if mask.sum() < 2:
+        return np.nan, {}
+
+    x_region = x[mask].copy()
+    y_region = y[mask].copy()
+
+    order = np.argsort(x_region)
+    x_region = x_region[order]
+    y_region = y_region[order]
+
+    if baseline == "minimum":
+        y_region = y_region - np.nanmin(y_region)
+
+    elif baseline == "linear":
+        y_low = np.interp(low, x_region, y_region)
+        y_high = np.interp(high, x_region, y_region)
+
+        baseline_line = np.interp(
+            x_region,
+            [low, high],
+            [y_low, y_high]
+        )
+
+        y_region = y_region - baseline_line
+
+    dx = (
+        float(np.nanmedian(np.abs(np.diff(x_region))))
+        if len(x_region) > 2
+        else np.nan
+    )
+
+    raw_sum = float(np.nansum(y_region))
+    dx_scaled_sum = raw_sum * dx if np.isfinite(dx) else np.nan
+
+    if scale_mode == "raw":
+        selected_area = raw_sum
+    else:
+        selected_area = dx_scaled_sum
+
+    if absolute:
+        selected_area = abs(selected_area)
+        raw_sum = abs(raw_sum)
+        dx_scaled_sum = abs(dx_scaled_sum)
+
+    diagnostics = {
+        "sum_raw_points": raw_sum,
+        "sum_dx_scaled": dx_scaled_sum,
+        "sum_dx_ppm": dx,
+        "sum_n_points": int(len(x_region)),
+        "sum_scale_mode": scale_mode,
+    }
+
+    return float(selected_area), diagnostics
 def pseudo_voigt(x, amplitude, center, sigma, gamma, eta):
     """Single pseudo-Voigt line shape."""
     sigma = max(abs(sigma), 1e-12)
@@ -249,6 +324,24 @@ def pseudo_voigt(x, amplitude, center, sigma, gamma, eta):
     lorentzian = gamma**2 / ((x - center) ** 2 + gamma**2)
     return amplitude * (eta * lorentzian + (1 - eta) * gaussian)
 
+def gaussian_peak(x, amplitude, center, sigma):
+    """Single Gaussian peak. Amplitude is peak height."""
+    sigma = max(abs(sigma), 1e-12)
+    return amplitude * np.exp(-((x - center) ** 2) / (2 * sigma ** 2))
+
+
+def lorentzian_peak(x, amplitude, center, gamma):
+    """Single Lorentzian peak. Amplitude is peak height and gamma is HWHM."""
+    gamma = max(abs(gamma), 1e-12)
+    return amplitude * (gamma**2 / ((x - center) ** 2 + gamma**2))
+
+
+def gaussian_area_analytic(amplitude, sigma):
+    return float(amplitude * abs(sigma) * np.sqrt(2 * np.pi))
+
+
+def lorentzian_area_analytic(amplitude, gamma):
+    return float(amplitude * np.pi * abs(gamma))
 
 def multiplet_pseudo_voigt(x, center, sigma, gamma, eta, amplitude, spacing_hz, ratio_1, ratio_2, ratio_3, ratio_4, spectrometer_mhz, peak_count):
     """Pseudo-Voigt multiplet with up to four components.
@@ -354,6 +447,110 @@ def fit_single_peak(x, y):
 
     except Exception:
         return None, None, np.nan
+
+def fit_single_gaussian_peak(x, y):
+    """Fit one Gaussian peak."""
+    amplitude0 = float(np.nanmax(y))
+    center0 = float(x[np.nanargmax(y)])
+    sigma0 = max((np.nanmax(x) - np.nanmin(x)) / 20, 0.001)
+
+    p0 = [amplitude0, center0, sigma0]
+
+    bounds = (
+        [0, np.nanmin(x), 1e-6],
+        [np.inf, np.nanmax(x), np.inf]
+    )
+
+    try:
+        popt, _ = curve_fit(
+            gaussian_peak,
+            x,
+            y,
+            p0=p0,
+            bounds=bounds,
+            maxfev=20000
+        )
+
+        fitted = gaussian_peak(x, *popt)
+        fit_area = float(
+            np.trapezoid(fitted, x)
+            if hasattr(np, "trapezoid")
+            else np.trapz(fitted, x)
+        )
+
+        amplitude, center, sigma = popt
+        area_analytic = gaussian_area_analytic(amplitude, sigma)
+        fwhm_ppm = 2 * np.sqrt(2 * np.log(2)) * abs(sigma)
+
+        fit_params = {
+            "model": "gaussian",
+            "amplitude": amplitude,
+            "center_ppm": center,
+            "sigma_ppm": sigma,
+            "gamma_ppm": np.nan,
+            "eta": np.nan,
+            "fwhm_ppm": fwhm_ppm,
+            "area_numeric_ppm": fit_area,
+            "area_analytic_ppm": area_analytic,
+        }
+
+        return fit_params, fitted, fit_area
+
+    except Exception:
+        return None, None, np.nan
+
+
+def fit_single_lorentzian_peak(x, y):
+    """Fit one Lorentzian peak."""
+    amplitude0 = float(np.nanmax(y))
+    center0 = float(x[np.nanargmax(y)])
+    gamma0 = max((np.nanmax(x) - np.nanmin(x)) / 20, 0.001)
+
+    p0 = [amplitude0, center0, gamma0]
+
+    bounds = (
+        [0, np.nanmin(x), 1e-6],
+        [np.inf, np.nanmax(x), np.inf]
+    )
+
+    try:
+        popt, _ = curve_fit(
+            lorentzian_peak,
+            x,
+            y,
+            p0=p0,
+            bounds=bounds,
+            maxfev=20000
+        )
+
+        fitted = lorentzian_peak(x, *popt)
+        fit_area = float(
+            np.trapezoid(fitted, x)
+            if hasattr(np, "trapezoid")
+            else np.trapz(fitted, x)
+        )
+
+        amplitude, center, gamma = popt
+        area_analytic = lorentzian_area_analytic(amplitude, gamma)
+        fwhm_ppm = 2 * abs(gamma)
+
+        fit_params = {
+            "model": "lorentzian",
+            "amplitude": amplitude,
+            "center_ppm": center,
+            "sigma_ppm": np.nan,
+            "gamma_ppm": gamma,
+            "eta": np.nan,
+            "fwhm_ppm": fwhm_ppm,
+            "area_numeric_ppm": fit_area,
+            "area_analytic_ppm": area_analytic,
+        }
+
+        return fit_params, fitted, fit_area
+
+    except Exception:
+        return None, None, np.nan
+
 
 def fit_multiplet_peak(x, y, peak_count, spectrometer_mhz):
     """Fit a constrained pseudo-Voigt multiplet with up to four peaks."""
@@ -683,7 +880,14 @@ def calculate_fit_quality_metrics(x_region, y_region, fit, sum_area_selected, fi
 
     return metrics
 
-def calculate_integral_for_method(df, region, method, baseline_mode, peak_count=1, spectrometer_mhz=500.0):
+def calculate_integral_for_method(
+    df,
+    region,
+    method,
+    baseline_mode,
+    peak_count=1,
+    spectrometer_mhz=500.0
+):
     """Calculate the integral of one spectrum region using the selected integration method."""
 
     x = df["ppm"].to_numpy(dtype=float)
@@ -703,29 +907,102 @@ def calculate_integral_for_method(df, region, method, baseline_mode, peak_count=
 
     if mask.sum() < 2:
         return np.nan, None
+
     sum_area_selected = integrate_region(
-        x, y,
-        region[0], region[1],
+        x,
+        y,
+        region[0],
+        region[1],
         absolute=True,
         baseline=baseline_for_integral
     )
 
-    # Prepare y_used for peak fitting methods
     y_used = y.copy()
 
     if baseline_for_integral == "minimum":
-        y_used = baseline_subtract_minimum(x, y_used, region[0], region[1])
+        y_used = baseline_subtract_minimum(
+            x,
+            y_used,
+            region[0],
+            region[1]
+        )
 
     elif baseline_for_integral == "linear":
-        y_low = np.interp(low, np.sort(x), y[np.argsort(x)])
-        y_high = np.interp(high, np.sort(x), y[np.argsort(x)])
+        order = np.argsort(x)
+        x_sorted = x[order]
+        y_sorted = y[order]
+
+        y_low = np.interp(low, x_sorted, y_sorted)
+        y_high = np.interp(high, x_sorted, y_sorted)
         baseline_line = np.interp(x, [low, high], [y_low, y_high])
         y_used = y_used - baseline_line
 
+    dx_ppm = float(np.nanmedian(np.abs(np.diff(x[mask])))) if mask.sum() > 2 else np.nan
+    dx_hz = dx_ppm * spectrometer_mhz if np.isfinite(dx_ppm) else np.nan
+
+    if method in ["Sum Integration", "Raw Point Sum"]:
+
+        scale_mode = "raw" if method == "Raw Point Sum" else "dx"
+
+        area_sum, sum_diagnostics = sum_integrate_region(
+            x,
+            y,
+            region[0],
+            region[1],
+            absolute=True,
+            baseline=baseline_for_integral,
+            scale_mode=scale_mode
+        )
+
+        return area_sum, {
+            "selected_area_type": (
+                "raw_point_sum"
+                if scale_mode == "raw"
+                else "sum_integration_dx_scaled"
+            ),
+            "sum_area_selected": area_sum,
+            "sum_raw_points": sum_diagnostics.get("sum_raw_points", np.nan),
+            "sum_dx_scaled": sum_diagnostics.get("sum_dx_scaled", np.nan),
+            "sum_dx_ppm": sum_diagnostics.get("sum_dx_ppm", np.nan),
+            "sum_n_points": sum_diagnostics.get("sum_n_points", np.nan),
+            "sum_scale_mode": sum_diagnostics.get("sum_scale_mode", ""),
+            "fit_area": np.nan,
+            "residual_area": np.nan,
+            "fit_sum_ratio": np.nan,
+            "fit_status": "not_applicable",
+            "integration_warning": (
+                "Experimental Sum Integration selected. "
+                "Both raw point-sum and dx-scaled sum were calculated for scale diagnostics."
+            ),
+            "dx_ppm": dx_ppm,
+            "dx_hz": dx_hz,
+        }
+
     if method == "Trapezoidal":
-        area_none = integrate_region(x, y, region[0], region[1], absolute=True, baseline="none")
-        area_linear = integrate_region(x, y, region[0], region[1], absolute=True, baseline="linear")
-        area_minimum = integrate_region(x, y, region[0], region[1], absolute=True, baseline="minimum")
+        area_none = integrate_region(
+            x,
+            y,
+            region[0],
+            region[1],
+            absolute=True,
+            baseline="none"
+        )
+        area_linear = integrate_region(
+            x,
+            y,
+            region[0],
+            region[1],
+            absolute=True,
+            baseline="linear"
+        )
+        area_minimum = integrate_region(
+            x,
+            y,
+            region[0],
+            region[1],
+            absolute=True,
+            baseline="minimum"
+        )
 
         if baseline_for_integral == "linear":
             selected_area = area_linear
@@ -745,13 +1022,17 @@ def calculate_integral_for_method(df, region, method, baseline_mode, peak_count=
             "fit_sum_ratio": np.nan,
             "fit_status": "not_applicable",
             "integration_warning": "Sum/Trapezoidal area selected. No model-derived fit area was used.",
+            "dx_ppm": dx_ppm,
+            "dx_hz": dx_hz,
         }
 
     if method in ["Single pseudo-Voigt", "Single pseudo-Voigt fit"]:
-        fit_params, fit, fit_area = fit_single_peak(x[mask], y_used[mask])
+        fit_params, fit, fit_area_raw = fit_single_peak(
+            x[mask],
+            y_used[mask]
+        )
 
-        dx_ppm = float(np.nanmedian(np.abs(np.diff(x[mask])))) if mask.sum() > 2 else np.nan
-        dx_hz = dx_ppm * spectrometer_mhz if np.isfinite(dx_ppm) else np.nan
+        fit_area = abs(fit_area_raw) if np.isfinite(fit_area_raw) else np.nan
 
         area_analytic_ppm = (
             fit_params.get("area_analytic_ppm", np.nan)
@@ -761,11 +1042,12 @@ def calculate_integral_for_method(df, region, method, baseline_mode, peak_count=
 
         fit_numeric_analytic_ratio = (
             fit_area / area_analytic_ppm
-            if np.isfinite(fit_area) and np.isfinite(area_analytic_ppm) and area_analytic_ppm != 0
+            if np.isfinite(fit_area)
+            and np.isfinite(area_analytic_ppm)
+            and area_analytic_ppm != 0
             else np.nan
         )
 
-        fit_area = abs(fit_area) if np.isfinite(fit_area) else np.nan
         quality = calculate_fit_quality_metrics(
             x_region=x[mask],
             y_region=y_used[mask],
@@ -778,18 +1060,6 @@ def calculate_integral_for_method(df, region, method, baseline_mode, peak_count=
             quality["n_points_region"] / peak_count
             if peak_count > 0
             else np.nan
-        )
-
-        fit_sum_ratio = quality["fit_sum_ratio"]
-        residual_area = quality["residual_area"]
-
-
-        quality = calculate_fit_quality_metrics(
-            x_region=x[mask],
-            y_region=y_used[mask],
-            fit=fit,
-            sum_area_selected=sum_area_selected,
-            fit_area=fit_area,
         )
 
         fit_sum_ratio = quality["fit_sum_ratio"]
@@ -820,42 +1090,137 @@ def calculate_integral_for_method(df, region, method, baseline_mode, peak_count=
             "fit_quality_label": quality["fit_quality_label"],
             "dx_ppm": dx_ppm,
             "dx_hz": dx_hz,
+            "fit_model": "pseudo_voigt",
             "fit_amplitude": fit_params.get("amplitude", np.nan) if isinstance(fit_params, dict) else np.nan,
             "fit_center_ppm": fit_params.get("center_ppm", np.nan) if isinstance(fit_params, dict) else np.nan,
             "fit_sigma_ppm": fit_params.get("sigma_ppm", np.nan) if isinstance(fit_params, dict) else np.nan,
             "fit_gamma_ppm": fit_params.get("gamma_ppm", np.nan) if isinstance(fit_params, dict) else np.nan,
             "fit_eta": fit_params.get("eta", np.nan) if isinstance(fit_params, dict) else np.nan,
             "fit_fwhm_ppm": fit_params.get("fwhm_ppm", np.nan) if isinstance(fit_params, dict) else np.nan,
-            "fit_fwhm_hz": fit_params.get("fwhm_ppm", np.nan) * spectrometer_mhz if isinstance(fit_params, dict) else np.nan,
+            "fit_fwhm_hz": (
+                fit_params.get("fwhm_ppm", np.nan) * spectrometer_mhz
+                if isinstance(fit_params, dict)
+                else np.nan
+            ),
             "fit_area_analytic_ppm": area_analytic_ppm,
             "fit_numeric_analytic_ratio": fit_numeric_analytic_ratio,
         }
 
+    if method in ["Single Gaussian fit", "Single Lorentzian fit"]:
+
+        if method == "Single Gaussian fit":
+            fit_params, fit, fit_area_raw = fit_single_gaussian_peak(
+                x[mask],
+                y_used[mask]
+            )
+            selected_area_type = "fit_area_single_gaussian"
+        else:
+            fit_params, fit, fit_area_raw = fit_single_lorentzian_peak(
+                x[mask],
+                y_used[mask]
+            )
+            selected_area_type = "fit_area_single_lorentzian"
+
+        fit_area = abs(fit_area_raw) if np.isfinite(fit_area_raw) else np.nan
+
+        area_analytic_ppm = (
+            fit_params.get("area_analytic_ppm", np.nan)
+            if isinstance(fit_params, dict)
+            else np.nan
+        )
+
+        fit_numeric_analytic_ratio = (
+            fit_area / area_analytic_ppm
+            if np.isfinite(fit_area)
+            and np.isfinite(area_analytic_ppm)
+            and area_analytic_ppm != 0
+            else np.nan
+        )
+
+        quality = calculate_fit_quality_metrics(
+            x_region=x[mask],
+            y_region=y_used[mask],
+            fit=fit,
+            sum_area_selected=sum_area_selected,
+            fit_area=fit_area,
+        )
+
+        quality["n_points_per_peak"] = quality["n_points_region"]
+
+        fit_sum_ratio = quality["fit_sum_ratio"]
+        residual_area = quality["residual_area"]
+
+        if not np.isfinite(fit_area):
+            warning = "Fit failed."
+        elif np.isfinite(fit_sum_ratio) and fit_sum_ratio < 0.85:
+            warning = f"{method} area is much lower than Sum area. The model may be losing tails, overlap, or real signal."
+        elif np.isfinite(fit_sum_ratio) and fit_sum_ratio > 1.15:
+            warning = f"{method} area is higher than Sum area. Possible overfitting or baseline problem."
+        else:
+            warning = f"{method} and Sum are reasonably consistent."
+
+        return fit_area, {
+            "selected_area_type": selected_area_type,
+            "sum_area_selected": sum_area_selected,
+            "fit_area": fit_area,
+            "residual_area": residual_area,
+            "fit_sum_ratio": fit_sum_ratio,
+            "fit_status": "ok" if np.isfinite(fit_area) else "failed",
+            "integration_warning": warning,
+            "r2_local": quality["r2_local"],
+            "rmse": quality["rmse"],
+            "snr_local": quality["snr_local"],
+            "n_points_region": quality["n_points_region"],
+            "n_points_per_peak": quality["n_points_per_peak"],
+            "fit_quality_label": quality["fit_quality_label"],
+            "dx_ppm": dx_ppm,
+            "dx_hz": dx_hz,
+            "fit_model": (
+                fit_params.get("model", "")
+                if isinstance(fit_params, dict)
+                else ""
+            ),
+            "fit_amplitude": fit_params.get("amplitude", np.nan) if isinstance(fit_params, dict) else np.nan,
+            "fit_center_ppm": fit_params.get("center_ppm", np.nan) if isinstance(fit_params, dict) else np.nan,
+            "fit_sigma_ppm": fit_params.get("sigma_ppm", np.nan) if isinstance(fit_params, dict) else np.nan,
+            "fit_gamma_ppm": fit_params.get("gamma_ppm", np.nan) if isinstance(fit_params, dict) else np.nan,
+            "fit_eta": np.nan,
+            "fit_fwhm_ppm": fit_params.get("fwhm_ppm", np.nan) if isinstance(fit_params, dict) else np.nan,
+            "fit_fwhm_hz": (
+                fit_params.get("fwhm_ppm", np.nan) * spectrometer_mhz
+                if isinstance(fit_params, dict)
+                else np.nan
+            ),
+            "fit_area_analytic_ppm": area_analytic_ppm,
+            "fit_numeric_analytic_ratio": fit_numeric_analytic_ratio,
+        }
 
     if method in ["Multiplet pseudo-Voigt", "Multiplet pseudo-Voigt fit"]:
-        _, fit, fit_area = fit_multiplet_peak(
+        fit_params, fit, fit_area_raw = fit_multiplet_peak(
             x[mask],
             y_used[mask],
             peak_count,
             spectrometer_mhz
         )
 
-        fit_area = abs(fit_area) if np.isfinite(fit_area) else np.nan
+        fit_area = abs(fit_area_raw) if np.isfinite(fit_area_raw) else np.nan
 
-        fit_sum_ratio = (
-            fit_area / sum_area_selected
-            if np.isfinite(fit_area) and np.isfinite(sum_area_selected) and sum_area_selected != 0
+        quality = calculate_fit_quality_metrics(
+            x_region=x[mask],
+            y_region=y_used[mask],
+            fit=fit,
+            sum_area_selected=sum_area_selected,
+            fit_area=fit_area,
+        )
+
+        quality["n_points_per_peak"] = (
+            quality["n_points_region"] / peak_count
+            if peak_count > 0
             else np.nan
         )
 
-        residual_area = np.nan
-        if fit is not None:
-            residual = y_used[mask] - fit
-            residual_area = abs(float(
-                np.trapezoid(residual, x[mask])
-                if hasattr(np, "trapezoid")
-                else np.trapz(residual, x[mask])
-            ))
+        fit_sum_ratio = quality["fit_sum_ratio"]
+        residual_area = quality["residual_area"]
 
         if not np.isfinite(fit_area):
             warning = "Fit failed."
@@ -874,6 +1239,15 @@ def calculate_integral_for_method(df, region, method, baseline_mode, peak_count=
             "fit_sum_ratio": fit_sum_ratio,
             "fit_status": "ok" if np.isfinite(fit_area) else "failed",
             "integration_warning": warning,
+            "r2_local": quality["r2_local"],
+            "rmse": quality["rmse"],
+            "snr_local": quality["snr_local"],
+            "n_points_region": quality["n_points_region"],
+            "n_points_per_peak": quality["n_points_per_peak"],
+            "fit_quality_label": quality["fit_quality_label"],
+            "dx_ppm": dx_ppm,
+            "dx_hz": dx_hz,
+            "fit_model": "multiplet_pseudo_voigt",
         }
 
     return np.nan, None
@@ -1148,6 +1522,12 @@ for logo_name in ["qNMRSTD_logo.png","LAABio.png", "inmetro.png"]:
         st.sidebar.image(Image.open(p), use_container_width=True)
     except Exception:
         pass
+
+st.sidebar.link_button(
+    "📘 Tutorial / Documentation",
+    "https://github.com/RicardoMBorges/qnmr-externalstd/blob/main/README.md",
+    use_container_width=True
+)
 
 st.sidebar.divider()
 
@@ -1797,9 +2177,13 @@ Use pseudo-Voigt methods as diagnostic/model-based methods.
     integration_method = st.selectbox(
         "Method",
         [
+            "Sum Integration",
+            "Raw Point Sum",            
             "Trapezoidal",
             "Single pseudo-Voigt fit",
             "Multiplet pseudo-Voigt fit",
+            "Single Lorentzian fit",
+            "Single Gaussian fit"
         ],
         key="integration_method",
         help="For qNMR, Trapezoidal/Sum is usually the primary quantitative area."
