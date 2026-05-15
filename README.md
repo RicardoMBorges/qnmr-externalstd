@@ -1,4 +1,3 @@
-````md
 # qNMR External Calibration App — Complete User Guide
 
 ## Overview
