@@ -34,7 +34,7 @@ rather than fully automated “black-box” quantification.
 
 The source code is implemented in:
 
-`app_pulcon.py` :contentReference[oaicite:0]{index=0}
+`app_pulcon.py` 
 
 ---
 
@@ -844,7 +844,7 @@ rather than direct replacement of experimental area.
 
 #### Introduction
 
-This document describes the mathematical and numerical validation strategy used in the qNMR External Calibration application implemented in `app_pulcon.py`. :contentReference[oaicite:0]{index=0}
+This document describes the mathematical and numerical validation strategy used in the qNMR External Calibration application implemented in `app_pulcon.py`. 
 
 The goal is to verify whether differences between:
 
