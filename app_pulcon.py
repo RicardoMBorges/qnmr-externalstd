@@ -1139,6 +1139,18 @@ def get_current_source_label(source_label, uploaded_csv, processed_key):
 # =========================================================
 # Sidebar
 # =========================================================
+# LOGOs (optional)
+STATIC_DIR = Path(__file__).parent / "static"
+for logo_name in ["qNMRSTD_logo.png","LAABio.png", "inmetro.png"]: 
+    p = STATIC_DIR / logo_name
+    try:
+        from PIL import Image
+        st.sidebar.image(Image.open(p), use_container_width=True)
+    except Exception:
+        pass
+
+st.sidebar.divider()
+
 
 st.sidebar.title("qNMR External Calibration")
 st.sidebar.caption("External Calibration and Probe Damping Correction with External Reference")
